@@ -1,0 +1,445 @@
+
+================================================================================
+                    PROJECT 2 - PACMAN IMITATION LEARNING
+                         DOCUMENTATION COMPLETE
+================================================================================
+
+Ce document explique TOUT le projet. Garde-le pour l'oral!
+
+
+================================================================================
+PARTIE 1 : VUE GLOBALE DU PROJET
+================================================================================
+
+OBJECTIF:
+---------
+Apprendre à Pacman à imiter un expert en utilisant l'apprentissage supervisé.
+On dispose d'un dataset de paires (GameState, action) enregistrées par un expert.
+Le but est d'entraîner un réseau de neurones à prédire l'action de l'expert.
+
+PIPELINE COMPLETE:
+------------------
+1. data.py       : GameState → tenseur de 24 features
+2. architecture.py : Définit le réseau MLP (24 → 128 → 128 → 64 → 5)
+3. train.py      : Entraîne le modèle sur le dataset
+4. pacmanagent.py: Utilise le modèle pour jouer
+5. run.py        : Lance une partie visuelle
+6. write_submission.py : Génère submission.csv pour Gradescope
+
+FICHIERS DU PROJET:
+-------------------
+project2/
+├── datasets/
+│   ├── pacman_dataset.pkl    → 15018 paires (state, action) d'entraînement
+│   └── pacman_test.pkl       → States de test (sans labels)
+├── pacman_module/            → Moteur de jeu (NE PAS MODIFIER)
+├── data.py                   → Feature engineering + Dataset
+├── architecture.py           → Réseau de neurones
+├── train.py                  → Boucle d'entraînement
+├── pacmanagent.py            → Agent qui joue avec le modèle
+├── run.py                    → Visualisation du jeu
+├── write_submission.py       → Génération du CSV
+├── pacman_model.pth          → Poids du modèle entraîné
+└── submission.csv            → Prédictions pour Gradescope
+
+
+================================================================================
+PARTIE 2 : FEATURE ENGINEERING (data.py)
+================================================================================
+
+POURQUOI C'EST IMPORTANT:
+-------------------------
+Le feature engineering est CRITIQUE pour l'imitation learning.
+Un réseau de neurones ne peut pas apprendre directement d'un GameState brut.
+On doit extraire des informations pertinentes pour la prise de décision.
+
+NOS 24 FEATURES (toutes normalisées ~[0,1]):
+--------------------------------------------
+
+POSITION PACMAN (2 features):
+  [0] px / 20       Position X de Pacman
+  [1] py / 20       Position Y de Pacman
+
+INFORMATION GHOST (4 features):
+  [2] dx_ghost / 20    Direction X vers le ghost le plus proche
+  [3] dy_ghost / 20    Direction Y vers le ghost
+  [4] ghost_dist / 20  Distance Manhattan au ghost
+  [5] ghost_adjacent   1 si ghost à distance 1 (danger immédiat!)
+
+INFORMATION FOOD (4 features):
+  [6] n_food / 50          Nombre de food restante
+  [7] dx_food / 20         Direction X vers la food la plus proche
+  [8] dy_food / 20         Direction Y vers la food
+  [9] closest_food / 20    Distance à la food la plus proche
+
+GEOMETRIE DU LABYRINTHE (5 features):
+  [10] dist_north / 10  Distance au mur au Nord
+  [11] dist_south / 10  Distance au mur au Sud
+  [12] dist_east / 10   Distance au mur à l'Est
+  [13] dist_west / 10   Distance au mur à l'Ouest
+  [14] is_corner        1 si Pacman est dans un coin (≤2 directions libres)
+
+ETAT DU JEU (1 feature):
+  [15] score / 500      Score actuel (peut être négatif)
+
+FEATURES DE DANGER (3 features) - INNOVATION CLEE:
+  [16] danger_level      = 1/(ghost_dist+1), haut quand danger proche
+  [17] ghost_blocks_food = 1 si ghost entre Pacman et la food
+  [18] escape_options    = nombre de directions de fuite / 4
+
+ACTIONS LEGALES (5 features):
+  [19] legal_north  1 si NORTH est légal
+  [20] legal_south  1 si SOUTH est légal
+  [21] legal_east   1 si EAST est légal
+  [22] legal_west   1 si WEST est légal
+  [23] legal_stop   1 si STOP est légal
+
+POURQUOI LA NORMALISATION:
+--------------------------
+Les réseaux de neurones fonctionnent mieux quand toutes les features
+sont dans la même échelle. Sans normalisation:
+- Position X pourrait être 0-20
+- Score pourrait être -500 à +1000
+- Flags sont 0 ou 1
+
+Avec normalisation, tout est ~[0,1] ou [-1,1], ce qui:
+- Accélère la convergence
+- Évite que certaines features dominent
+- Stabilise les gradients
+
+
+================================================================================
+PARTIE 3 : ARCHITECTURE DU RESEAU (architecture.py)
+================================================================================
+
+CHOIX DE L'ARCHITECTURE:
+------------------------
+On utilise un MLP (Multi-Layer Perceptron) car:
+- Notre input est un vecteur 1D (24 features)
+- Pas besoin de CNN (pas de structure 2D/spatiale)
+- Simple et efficace pour cette tâche
+
+STRUCTURE:
+----------
+Input (24) → Linear(128) → BatchNorm → ReLU → Dropout(0.1)
+          → Linear(128) → BatchNorm → ReLU → Dropout(0.1)
+          → Linear(64)  → BatchNorm → ReLU → Dropout(0.1)
+          → Linear(5)   → Output (logits)
+
+JUSTIFICATION DES CHOIX:
+
+1. Taille des couches (128 → 128 → 64):
+   - Assez de capacité pour apprendre les patterns complexes
+   - Réduction progressive pour compresser l'information
+   - Testé empiriquement
+
+2. BatchNorm après chaque couche linéaire:
+   - Stabilise l'entraînement (évite les gradients explosifs)
+   - Accélère la convergence
+   - Permet d'utiliser des learning rates plus élevés
+
+3. ReLU comme activation:
+   - Simple et efficace
+   - Pas de problème de vanishing gradient
+   - Standard dans les MLP modernes
+
+4. Dropout 0.1 (faible):
+   - Régularisation légère pour éviter l'overfitting
+   - 0.1 au lieu de 0.2 car on veut garder l'information
+   - BatchNorm fait déjà de la régularisation
+
+5. Pas d'activation finale:
+   - CrossEntropyLoss attend des logits bruts
+   - Elle applique LogSoftmax en interne
+
+
+================================================================================
+PARTIE 4 : ENTRAINEMENT (train.py)
+================================================================================
+
+PIPELINE D'ENTRAINEMENT:
+------------------------
+1. Charger le dataset (15018 échantillons)
+2. Split train/validation (80%/20%)
+3. Entraîner pendant 50 epochs
+4. Sauvegarder le meilleur modèle
+
+HYPERPARAMETRES:
+----------------
+- batch_size = 128      → Bon équilibre vitesse/stabilité
+- epochs = 50           → Assez pour converger
+- lr = 1e-3             → Learning rate standard pour Adam
+- weight_decay = 1e-4   → Régularisation L2 légère
+- val_ratio = 0.2       → 20% pour validation
+
+LOSS FUNCTION: CrossEntropyLoss
+-------------------------------
+C'est le choix standard pour la classification multi-classe.
+Elle combine LogSoftmax + NLLLoss en une seule opération efficace.
+
+OPTIMIZER: Adam
+---------------
+Adam est le choix par défaut pour le deep learning:
+- Adapte le learning rate par paramètre
+- Gère bien les gradients bruités
+- Converge rapidement
+
+LEARNING RATE SCHEDULER: ReduceLROnPlateau
+------------------------------------------
+Réduit le lr de 50% si la val_loss ne s'améliore pas pendant 5 epochs.
+Permet un apprentissage plus fin vers la fin de l'entraînement.
+
+CHECKPOINTING:
+--------------
+On sauvegarde le modèle avec la meilleure val_accuracy, pas le dernier.
+Cela évite de garder un modèle overfit.
+
+
+================================================================================
+PARTIE 5 : AGENT (pacmanagent.py)
+================================================================================
+
+FONCTIONNEMENT:
+---------------
+L'agent est très simple (comme requis par le projet):
+
+1. Recevoir un GameState
+2. Convertir en tenseur avec state_to_tensor()
+3. Passer le tenseur dans le modèle
+4. Obtenir les probabilités avec softmax
+5. Retourner la meilleure action LEGALE
+
+POURQUOI VERIFIER LES ACTIONS LEGALES:
+--------------------------------------
+Le modèle pourrait prédire une action illégale (ex: aller au Nord
+quand il y a un mur). On trie les actions par probabilité et on
+prend la première qui est légale.
+
+PAS DE HEURISTIQUES:
+--------------------
+L'agent n'utilise PAS de règles codées en dur (comme "fuir si ghost proche").
+Toute la logique vient du réseau de neurones. C'est le principe de
+l'imitation learning: apprendre à imiter, pas coder des règles.
+
+
+================================================================================
+PARTIE 6 : RESULTATS
+================================================================================
+
+AVANT LES AMELIORATIONS:
+------------------------
+- val_accuracy: ~85%
+- Score en jeu: -488 (Pacman meurt)
+- Problème: boucles infinies, ne comprend pas le danger
+
+APRES LES AMELIORATIONS:
+------------------------
+- val_accuracy: 87.45%
+- Score en jeu: +528 (Pacman GAGNE!)
+- Temps de calcul: ~0.2 secondes
+
+CE QUI A FAIT LA DIFFERENCE:
+----------------------------
+1. Normalisation des features → convergence plus rapide
+2. BatchNorm → entraînement stable
+3. Features de danger → le modèle comprend QUAND c'est dangereux
+4. Learning rate scheduler → meilleure convergence finale
+
+
+================================================================================
+PARTIE 7 : COMMANDES UTILES
+================================================================================
+
+# Entraîner le modèle
+python train.py
+
+# Tester visuellement
+python run.py
+
+# Générer la soumission pour Gradescope
+python write_submission.py
+
+
+================================================================================
+PARTIE 8 : QUESTIONS POSSIBLES A L'ORAL
+================================================================================
+
+Q: Pourquoi un MLP et pas un CNN?
+R: Notre input est un vecteur 1D de features, pas une image 2D.
+   Les convolutions n'ont pas de sens sur un vecteur 1D.
+
+Q: Pourquoi normaliser les features?
+R: Les NN convergent mieux quand les inputs sont dans la même échelle.
+   Sans normalisation, certaines features domineraient les autres.
+
+Q: Pourquoi BatchNorm?
+R: Stabilise l'entraînement, accélère la convergence, et fait de la
+   régularisation. C'est devenu standard dans les architectures modernes.
+
+Q: Pourquoi CrossEntropyLoss?
+R: C'est la loss standard pour la classification multi-classe.
+   Elle combine LogSoftmax et NLLLoss efficacement.
+
+Q: Pourquoi Adam?
+R: C'est l'optimizer par défaut. Il adapte le learning rate par
+   paramètre et converge rapidement.
+
+Q: Pourquoi les features de danger?
+R: Le modèle avait du mal à éviter les ghosts avec juste la distance.
+   danger_level donne un gradient de danger, ghost_blocks_food dit
+   si le chemin vers la food est dangereux, escape_options dit
+   combien de fuites sont possibles.
+
+Q: Comment gérer les actions illégales?
+R: On trie les prédictions par probabilité et on prend la première
+   action qui est dans la liste des actions légales.
+
+Q: Pourquoi 50 epochs?
+R: Testé empiriquement. Moins = underfitting, plus = overfitting.
+   Le scheduler aide aussi à s'arrêter au bon moment.
+
+
+================================================================================
+PARTIE 9 : COMPARAISON ORIGINAL vs NOTRE IMPLEMENTATION
+================================================================================
+
+Les fichiers du GitHub sont des TEMPLATES VIDES avec "# Your code here".
+Voici exactement ce que nous avons implémenté :
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ARCHITECTURE.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ORIGINAL (GitHub):
+------------------
+class PacmanNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Your code here
+
+    def forward(self, x):
+        # Your code here
+        return # ...
+
+NOTRE IMPLEMENTATION:
+---------------------
+- input_dim = 24 (nos features)
+- output_dim = 5 (les 5 actions)
+- 3 couches cachées: 128 → 128 → 64
+- BatchNorm1d après chaque Linear (stabilité)
+- ReLU comme activation
+- Dropout(0.1) pour régularisation
+- Pas d'activation finale (CrossEntropyLoss veut des logits)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATA.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ORIGINAL (GitHub):
+------------------
+def state_to_tensor(state):
+    # Feature engineering here
+    return # tensor
+
+class PacmanDataset(Dataset):
+    def __init__(self, path):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        self.inputs = []
+        self.actions = []
+        # Your code here
+
+NOTRE IMPLEMENTATION:
+---------------------
+state_to_tensor() extrait 24 features normalisées:
+  - Position Pacman (2): px/20, py/20
+  - Ghost info (4): dx, dy, distance, adjacent
+  - Food info (4): n_food, dx, dy, distance
+  - Maze geometry (5): dist_north/south/east/west, is_corner
+  - Score (1): score/500
+  - Danger features (3): danger_level, ghost_blocks_food, escape_options
+  - Legal actions (5): one-hot encoding
+
+PacmanDataset:
+  - Charge le pickle
+  - Convertit chaque (state, action) en (tensor, index)
+  - ACTION_TO_INDEX et INDEX_TO_ACTION pour les mappings
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRAIN.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ORIGINAL (GitHub):
+------------------
+class Pipeline(nn.Module):
+    def __init__(self, path):
+        self.dataset = PacmanDataset(path)
+        self.model = PacmanNetwork()
+        self.criterion = # Your code here
+        self.optimizer = # Your code here
+
+    def train(self):
+        print("Beginning of the training of your network...")
+        # Your code here
+        torch.save(self.model.state_dict(), "pacman_model.pth")
+
+NOTRE IMPLEMENTATION:
+---------------------
+__init__:
+  - device = cuda ou cpu
+  - criterion = CrossEntropyLoss()
+  - optimizer = Adam(lr=1e-3, weight_decay=1e-4)
+  - scheduler = ReduceLROnPlateau (réduit lr si val_loss stagne)
+
+train():
+  - Split 80/20 train/validation
+  - DataLoader avec batch_size=128, shuffle=True
+  - 50 epochs avec:
+    * Phase training (model.train())
+    * Phase validation (model.eval(), torch.no_grad())
+    * Affichage loss et accuracy
+    * Sauvegarde du meilleur modèle (best val_acc)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PACMANAGENT.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ORIGINAL (GitHub):
+------------------
+class PacmanAgent(Agent):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model.eval()
+
+    def get_action(self, state):
+        x = state_to_tensor(state).unsqueeze(0)
+        # Your code here
+        return # ...
+
+NOTRE IMPLEMENTATION:
+---------------------
+get_action():
+  1. legal_actions = state.getLegalPacmanActions()
+  2. x = state_to_tensor(state).unsqueeze(0)
+  3. x = x.to(device)  # même device que le modèle
+  4. with torch.no_grad():
+       logits = model(x)[0]
+       probs = softmax(logits)
+       sorted_indices = argsort(probs, descending=True)
+  5. Retourne la meilleure action LEGALE
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RUN.PY et WRITE_SUBMISSION.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Ces fichiers sont FOURNIS par le projet et n'ont PAS été modifiés.
+Ils fonctionnent directement avec notre implémentation.
+
+
+================================================================================
+                              FIN DU DOCUMENT
+================================================================================
