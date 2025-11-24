@@ -1,21 +1,5 @@
 """
-train.py - Pipeline d'entraînement pour Pacman
-
-============================================================================
-ORIGINAL (GitHub template):
-----------------------------------------------------------------------------
-class Pipeline(nn.Module):
-    def __init__(self, path):
-        self.dataset = PacmanDataset(path)
-        self.model = PacmanNetwork()
-        self.criterion = # Your code here
-        self.optimizer = # Your code here
-
-    def train(self):
-        print("Beginning of the training of your network...")
-        # Your code here
-        torch.save(self.model.state_dict(), "pacman_model.pth")
-============================================================================
+train.py - Training Pipeline for Pacman
 """
 
 import torch
@@ -28,75 +12,52 @@ from data import PacmanDataset
 
 class Pipeline(nn.Module):
     """
-    Pipeline d'entraînement complète.
+    Complete training pipeline.
 
-    Arguments:
-        path: Chemin vers pacman_dataset.pkl
-
-    Attributes:
-        device: CPU ou CUDA
-        dataset: PacmanDataset chargé
-        model: PacmanNetwork
-        criterion: Fonction de loss
-        optimizer: Optimiseur
-        scheduler: Learning rate scheduler
+    Args:
+        path: Path to pacman_dataset.pkl
     """
 
     def __init__(self, path: str):
         """
-        Initialise la pipeline.
+        Initialize the pipeline.
 
-        Arguments:
-            path: Chemin vers pacman_dataset.pkl
+        Args:
+            path: Path to pacman_dataset.pkl
         """
         super().__init__()
 
-        # ---------- NOTRE CODE COMMENCE ICI ----------
-
-        # Utiliser GPU si disponible
+        # Use GPU if available
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Charger le dataset
+        # Load dataset
         self.dataset = PacmanDataset(path)
 
-        # Initialiser le modèle
+        # Initialize model
         self.model = PacmanNetwork().to(self.device)
 
-        # Loss: CrossEntropyLoss est standard pour la classification multi-classe
+        # Loss: CrossEntropyLoss is standard for multi-class classification
         self.criterion = nn.CrossEntropyLoss()
 
-        # Optimizer: Adam avec weight_decay pour régularisation L2
+        # Optimizer: Adam
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
-            lr=1e-3,           # Learning rate standard
-            weight_decay=1e-4  # Régularisation L2
+            lr=1e-3  # Standard learning rate
         )
-
-        # Scheduler: réduit lr quand val_loss stagne
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='min',    # Minimiser val_loss
-            factor=0.5,    # Diviser lr par 2
-            patience=5     # Attendre 5 epochs avant de réduire
-        )
-
-        # ---------- FIN DE NOTRE CODE ----------
 
     def train(self, batch_size: int = 128, epochs: int = 50, val_ratio: float = 0.2):
         """
-        Lance l'entraînement complet.
+        Run complete training.
 
-        Arguments:
-            batch_size: Taille des batches (128 par défaut)
-            epochs: Nombre d'epochs (50 par défaut)
-            val_ratio: Ratio de validation (0.2 = 20%)
+        Args:
+            batch_size: Batch size (default 128)
+            epochs: Number of epochs (default 50)
+            val_ratio: Validation ratio (0.2 = 20%)
 
         Returns:
-            None (sauvegarde le modèle dans pacman_model.pth)
+            None (saves model to pacman_model.pth)
         """
         print("Beginning of the training of your network...")
-
-        # ---------- NOTRE CODE COMMENCE ICI ----------
 
         # Split train/validation
         dataset_size = len(self.dataset)
@@ -109,14 +70,14 @@ class Pipeline(nn.Module):
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
-        # Tracking du meilleur modèle
+        # Track best model
         best_val_acc = 0.0
         best_state_dict = None
 
-        # Boucle d'entraînement
+        # Training loop
         for epoch in range(1, epochs + 1):
 
-            # ----- PHASE TRAINING -----
+            # ----- TRAINING PHASE -----
             self.model.train()
             for inputs, labels in train_loader:
                 inputs = inputs.to(self.device)
@@ -128,7 +89,7 @@ class Pipeline(nn.Module):
                 loss.backward()
                 self.optimizer.step()
 
-            # ----- PHASE VALIDATION -----
+            # ----- VALIDATION PHASE -----
             self.model.eval()
             val_loss = 0.0
             val_correct = 0
@@ -150,20 +111,15 @@ class Pipeline(nn.Module):
             val_loss = val_loss / val_total if val_total > 0 else 0.0
             val_acc = val_correct / val_total if val_total > 0 else 0.0
 
-            # Affichage
+            # Display
             print(f"Round {epoch}/{epochs} - accuracy: {val_acc:.2%}")
 
-            # Update scheduler
-            self.scheduler.step(val_loss)
-
-            # Sauvegarder le meilleur modèle
+            # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_state_dict = self.model.state_dict()
 
-        # ---------- FIN DE NOTRE CODE ----------
-
-        # Charger et sauvegarder le meilleur modèle
+        # Load and save best model
         if best_state_dict is not None:
             self.model.load_state_dict(best_state_dict)
 

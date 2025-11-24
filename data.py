@@ -1,21 +1,5 @@
 """
-data.py - Dataset et Feature Engineering pour Pacman
-
-============================================================================
-ORIGINAL (GitHub template):
-----------------------------------------------------------------------------
-def state_to_tensor(state):
-    # Feature engineering here
-    return # tensor
-
-class PacmanDataset(Dataset):
-    def __init__(self, path):
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-        self.inputs = []
-        self.actions = []
-        # Your code here
-============================================================================
+data.py - Dataset and Feature Engineering for Pacman
 """
 
 import pickle
@@ -29,7 +13,7 @@ except ImportError:
 
 
 # =============================================================================
-# MAPPINGS ACTIONS <-> INDICES
+# ACTION <-> INDEX MAPPINGS
 # =============================================================================
 
 ACTIONS = [
@@ -45,128 +29,158 @@ INDEX_TO_ACTION = {idx: action for action, idx in ACTION_TO_INDEX.items()}
 
 
 # =============================================================================
-# FEATURE EXTRACTION - NOTRE IMPLEMENTATION
+# FEATURE EXTRACTION
 # =============================================================================
 
 def state_to_tensor(state: object) -> torch.Tensor:
     """
-    Extrait 24 features normalisées d'un GameState.
+    Extract 24 normalized features from a GameState.
 
-    ---------- NOTRE IMPLEMENTATION ----------
-
-    Features extraites (toutes normalisées ~[0,1]):
-    - Position Pacman (2): px, py
-    - Info Ghost (4): dx, dy, distance, adjacent
-    - Info Food (4): n_food, dx, dy, distance
-    - Géométrie maze (5): dist_north/south/east/west, is_corner
+    Features (all normalized ~[0,1]):
+    - Pacman position (2): px, py
+    - Ghost info (4): dx, dy, distance, adjacent
+    - Food info (4): n_food, dx, dy, distance
+    - Maze geometry (5): dist_north/south/east/west, is_corner
     - Score (1)
     - Danger (3): danger_level, ghost_blocks_food, escape_options
-    - Actions légales (5): one-hot encoding
+    - Legal actions (5): one-hot encoding
 
-    Arguments:
-        state: Objet GameState du moteur Pacman
+    Args:
+        state: GameState object from Pacman engine
 
     Returns:
-        Tensor 1D de 24 float32 normalisés
+        1D Tensor of 24 normalized float32 values
     """
 
-    # ---------- NOTRE CODE COMMENCE ICI ----------
+    # 1. PACMAN POSITION
+    pac_pos_x, pac_pos_y = state.getPacmanPosition()
 
-    # 1. POSITION PACMAN
-    px, py = state.getPacmanPosition()
-
-    # 2. INFO GHOST (on se concentre sur le plus proche)
+    # 2. GHOST INFO (focus on closest ghost)
     ghost_positions = state.getGhostPositions()
     if ghost_positions:
-        distances = [abs(px - gx) + abs(py - gy) for gx, gy in ghost_positions]
+        distances = [abs(pac_pos_x - gx) + abs(pac_pos_y - gy) for gx, gy in ghost_positions]
         min_idx = int(torch.argmin(torch.tensor(distances)))
-        gx, gy = ghost_positions[min_idx]
+        ghost_x, ghost_y = ghost_positions[min_idx]
         ghost_dist = float(distances[min_idx])
     else:
-        gx, gy = px, py
+        ghost_x, ghost_y = pac_pos_x, pac_pos_y
         ghost_dist = 0.0
 
-    dx_ghost = float(gx - px)
-    dy_ghost = float(gy - py)
+    dx_ghost = float(ghost_x - pac_pos_x)
+    dy_ghost = float(ghost_y - pac_pos_y)
     ghost_adjacent = 1.0 if ghost_dist == 1.0 else 0.0
 
-    # 3. INFO FOOD (on se concentre sur la plus proche)
+    # 3. FOOD INFO (focus on closest food)
     food = state.getFood()
     food_positions = food.asList()
     n_food = float(len(food_positions))
 
     if food_positions:
-        food_dists = [abs(px - fx) + abs(py - fy) for fx, fy in food_positions]
-        min_f_idx = int(torch.argmin(torch.tensor(food_dists)))
-        fx, fy = food_positions[min_f_idx]
-        closest_food_dist = float(food_dists[min_f_idx])
-        dx_food = float(fx - px)
-        dy_food = float(fy - py)
-    else:
-        closest_food_dist = 0.0
-        dx_food = 0.0
-        dy_food = 0.0
+        # Calculate Manhattan distance from Pacman to each food
+        distances_to_all_foods = [abs(pac_pos_x - food_x) + abs(pac_pos_y - food_y)
+                                   for food_x, food_y in food_positions]
 
-    # 4. GEOMETRIE DU LABYRINTHE
+        # Find which food is closest
+        closest_food_index = int(torch.argmin(torch.tensor(distances_to_all_foods)))
+        closest_food_x, closest_food_y = food_positions[closest_food_index]
+
+        # Distance to that closest food
+        closest_food_dist = float(distances_to_all_foods[closest_food_index])
+
+        # Direction from Pacman to closest food
+        direction_to_food_x = float(closest_food_x - pac_pos_x)
+        direction_to_food_y = float(closest_food_y - pac_pos_y)
+    else:
+        # No food left
+        closest_food_dist = 0.0
+        direction_to_food_x = 0.0
+        direction_to_food_y = 0.0
+
+    # 4. MAZE GEOMETRY
+    # Get wall grid and maze dimensions
     walls = state.getWalls()
     W, H = walls.width, walls.height
 
-    def dist_until_wall(start_x, start_y, dx, dy):
-        """Distance jusqu'au mur dans une direction."""
-        d = 0
-        x, y = start_x, start_y
+    def dist_until_wall(start_x, start_y, direction_x, direction_y):
+        """
+        Count how many steps Pacman can take in a direction before hitting a wall.
+
+        Args:
+            start_x, start_y: Pacman's current position
+            direction_x, direction_y: Direction to check (e.g., (0, 1) = North)
+
+        Returns:
+            Number of free cells before hitting a wall or boundary
+        """
+        distance = 0
+        current_x, current_y = start_x, start_y
+
         while True:
-            x += dx
-            y += dy
-            if not (0 <= x < W and 0 <= y < H):
-                break
-            if walls[x][y]:
-                break
-            d += 1
-        return float(d)
+            # Move one step in the direction
+            current_x += direction_x
+            current_y += direction_y
 
-    dist_north = dist_until_wall(px, py, 0, 1)
-    dist_south = dist_until_wall(px, py, 0, -1)
-    dist_east = dist_until_wall(px, py, 1, 0)
-    dist_west = dist_until_wall(px, py, -1, 0)
+            # Check if we're out of bounds
+            if not (0 <= current_x < W and 0 <= current_y < H):
+                break
 
-    # Détection de coin (peu d'options de fuite = dangereux)
-    free_dirs = 0
-    for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-        nx, ny = px + dx, py + dy
-        if 0 <= nx < W and 0 <= ny < H and not walls[nx][ny]:
-            free_dirs += 1
-    is_corner = 1.0 if free_dirs <= 2 else 0.0
+            # Check if we hit a wall
+            if walls[current_x][current_y]:
+                break
+
+            distance += 1
+
+        return float(distance)
+
+    # Calculate distance to walls in each cardinal direction
+    dist_north = dist_until_wall(pac_pos_x, pac_pos_y, 0, 1)   # Up
+    dist_south = dist_until_wall(pac_pos_x, pac_pos_y, 0, -1)  # Down
+    dist_east = dist_until_wall(pac_pos_x, pac_pos_y, 1, 0)    # Right
+    dist_west = dist_until_wall(pac_pos_x, pac_pos_y, -1, 0)   # Left
+
+    # Corner detection: count how many directions are free
+    # If <= 2 directions free, Pacman is in a corner (dangerous!)
+    free_directions = 0
+    for direction_x, direction_y in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+        neighbor_x = pac_pos_x + direction_x
+        neighbor_y = pac_pos_y + direction_y
+
+        # Check if neighbor is valid and not a wall
+        if 0 <= neighbor_x < W and 0 <= neighbor_y < H and not walls[neighbor_x][neighbor_y]:
+            free_directions += 1
+
+    # 1 if in corner (<=2 exits), 0 otherwise
+    is_corner = 1.0 if free_directions <= 2 else 0.0
 
     # 5. SCORE
     score = float(state.getScore())
 
-    # 6. ACTIONS LEGALES (one-hot)
+    # 6. LEGAL ACTIONS (one-hot)
     legal_actions = state.getLegalPacmanActions()
     legal_flags = [1.0 if a in legal_actions else 0.0 for a in ACTIONS]
 
-    # 7. FEATURES DE DANGER (innovation clé!)
-    # - danger_level: inverse de la distance, haut quand ghost proche
+    # 7. DANGER FEATURES
+    # - danger_level: inverse of distance, high when ghost is close
     danger_level = 1.0 / (ghost_dist + 1.0)
 
-    # - ghost_blocks_food: 1 si ghost entre pacman et food
+    # - ghost_blocks_food: 1 if ghost is between pacman and food
     ghost_blocks_food = 0.0
     if ghost_positions and food_positions:
-        same_direction = (dx_ghost * dx_food > 0 or dy_ghost * dy_food > 0)
+        same_direction = (dx_ghost * direction_to_food_x > 0 or dy_ghost * direction_to_food_y > 0)
         if same_direction and ghost_dist < closest_food_dist:
             ghost_blocks_food = 1.0
 
-    # - escape_options: nombre de directions de fuite
+    # - escape_options: number of escape directions
     escape_options = sum(1.0 for a in legal_actions if a != Directions.STOP) / 4.0
 
-    # 8. NORMALISATION ET CONSTRUCTION DU VECTEUR
+    # 8. NORMALIZATION AND VECTOR CONSTRUCTION
     MAX_DIST = 20.0
     MAX_COORD = 20.0
 
     features = [
         # Position (2)
-        float(px) / MAX_COORD,
-        float(py) / MAX_COORD,
+        float(pac_pos_x) / MAX_COORD,
+        float(pac_pos_y) / MAX_COORD,
         # Ghost (4)
         dx_ghost / MAX_DIST,
         dy_ghost / MAX_DIST,
@@ -174,8 +188,8 @@ def state_to_tensor(state: object) -> torch.Tensor:
         ghost_adjacent,
         # Food (4)
         n_food / 50.0,
-        dx_food / MAX_DIST,
-        dy_food / MAX_DIST,
+        direction_to_food_x / MAX_DIST,
+        direction_to_food_y / MAX_DIST,
         closest_food_dist / MAX_DIST,
         # Geometry (5)
         dist_north / 10.0,
@@ -195,31 +209,29 @@ def state_to_tensor(state: object) -> torch.Tensor:
 
     return torch.tensor(features, dtype=torch.float32)
 
-    # ---------- FIN DE NOTRE CODE ----------
-
 
 # =============================================================================
-# DATASET CLASS - NOTRE IMPLEMENTATION
+# DATASET CLASS
 # =============================================================================
 
 class PacmanDataset(Dataset):
     """
-    Dataset PyTorch pour charger les données d'expert Pacman.
+    PyTorch Dataset for loading Pacman expert data.
 
-    Arguments:
-        path: Chemin vers pacman_dataset.pkl
+    Args:
+        path: Path to pacman_dataset.pkl
 
     Attributes:
-        inputs: Liste de tensors de features
-        labels: Liste d'indices d'actions
+        inputs: List of feature tensors
+        labels: List of action indices
     """
 
     def __init__(self, path: str):
         """
-        Charge le dataset et convertit tous les états en tensors.
+        Load dataset and convert all states to tensors.
 
-        Arguments:
-            path: Chemin vers le fichier pickle
+        Args:
+            path: Path to pickle file
         """
         with open(path, "rb") as f:
             data = pickle.load(f)
@@ -227,13 +239,11 @@ class PacmanDataset(Dataset):
         self.inputs = []
         self.labels = []
 
-        # ---------- NOTRE CODE COMMENCE ICI ----------
-
         for state, action in data:
-            # Convertir GameState en tensor de features
+            # Convert GameState to feature tensor
             x = state_to_tensor(state)
 
-            # Convertir action en index (skip si action inconnue)
+            # Convert action to index (skip if unknown action)
             if action not in ACTION_TO_INDEX:
                 continue
             y = ACTION_TO_INDEX[action]
@@ -241,25 +251,18 @@ class PacmanDataset(Dataset):
             self.inputs.append(x)
             self.labels.append(y)
 
-        # ---------- FIN DE NOTRE CODE ----------
-
     def __len__(self) -> int:
-        """
-        Retourne le nombre d'échantillons.
-
-        Returns:
-            Nombre de paires (state, action)
-        """
+        """Returns number of samples."""
         return len(self.inputs)
 
     def __getitem__(self, idx: int):
         """
-        Récupère un échantillon.
+        Get a sample.
 
-        Arguments:
-            idx: Index de l'échantillon
+        Args:
+            idx: Sample index
 
         Returns:
-            Tuple (tensor_features, index_action)
+            Tuple (feature_tensor, action_index)
         """
         return self.inputs[idx], self.labels[idx]

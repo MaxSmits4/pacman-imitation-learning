@@ -4,8 +4,6 @@
                          DOCUMENTATION COMPLETE
 ================================================================================
 
-Ce document explique TOUT le projet. Garde-le pour l'oral!
-
 
 ================================================================================
 PARTIE 1 : VUE GLOBALE DU PROJET
@@ -25,6 +23,27 @@ PIPELINE COMPLETE:
 4. pacmanagent.py: Utilise le modèle pour jouer
 5. run.py        : Lance une partie visuelle
 6. write_submission.py : Génère submission.csv pour Gradescope
+
+ORDRE DE LECTURE RECOMMANDE:
+-----------------------------
+Pour comprendre le projet, lire les fichiers dans cet ordre :
+
+1. data.py (Feature Engineering)
+   C'est LA partie la plus importante. On convertit GameState → 24 features.
+   Features extraites : position, ghosts, food, géométrie, danger, actions légales.
+   Tout est normalisé pour que le réseau converge bien.
+
+2. architecture.py (Réseau de neurones)
+   MLP avec BatchNorm : 24 → 128 → 128 → 64 → 5
+   Architecture simple mais efficace, avec BatchNorm pour stabilité.
+
+3. train.py (Entraînement)
+   Split train/validation 80/20, Adam optimizer, 50 epochs.
+   Sauvegarde le meilleur modèle selon val_accuracy.
+
+4. pacmanagent.py (Agent)
+   Utilise le modèle entraîné pour jouer.
+   Convertit l'état → features → forward → softmax → meilleure action légale.
 
 FICHIERS DU PROJET:
 -------------------
@@ -108,49 +127,250 @@ Avec normalisation, tout est ~[0,1] ou [-1,1], ce qui:
 - Stabilise les gradients
 
 
+EXPLICATION DETAILLEE : DETECTION DE LA NOURRITURE LA PLUS PROCHE
+-------------------------------------------------------------------
+Cette partie du code (lignes 73-98 de data.py) trouve la food la plus proche
+et calcule sa direction depuis Pacman. C'est crucial car Pacman doit toujours
+savoir où aller chercher de la nourriture.
+
+ETAPE 1 : Obtenir toutes les positions de food
+
+    food = state.getFood()              # Grille avec True où il y a de la food
+    food_positions = food.asList()      # Liste de toutes les coordonnées (x,y)
+    n_food = float(len(food_positions)) # Combien de food reste-t-il ?
+
+Exemple : food_positions = [(5, 3), (7, 8), (2, 4), ...]
+
+ETAPE 2 : Calculer la distance à CHAQUE food
+
+    distances_to_all_foods = [abs(pac_pos_x - food_x) + abs(pac_pos_y - food_y)
+                               for food_x, food_y in food_positions]
+
+On utilise la DISTANCE MANHATTAN (aussi appelée "distance taxi"):
+- Distance Manhattan = |Δx| + |Δy|
+- C'est le nombre de cases à parcourir (pas la ligne droite!)
+- Exemple : de (1,1) à (4,3) = |4-1| + |3-1| = 3 + 2 = 5 cases
+
+Pourquoi Manhattan et pas Euclidienne ?
+→ Pacman ne peut pas traverser les murs en diagonale
+→ Il doit suivre les couloirs du labyrinthe
+→ Manhattan = distance réelle dans le labyrinthe
+
+ETAPE 3 : Trouver quelle food est la plus proche
+
+    closest_food_index = int(torch.argmin(torch.tensor(distances_to_all_foods)))
+
+torch.argmin() trouve l'INDEX de la plus petite valeur dans la liste.
+
+Exemple :
+    distances_to_all_foods = [10, 3, 7, 15, 5]
+    argmin() retourne 1 (car distances[1] = 3 est le minimum)
+
+ETAPE 4 : Récupérer les infos de cette food
+
+    closest_food_x, closest_food_y = food_positions[closest_food_index]
+    closest_food_dist = float(distances_to_all_foods[closest_food_index])
+
+Maintenant on sait:
+- Où est la food la plus proche (closest_food_x, closest_food_y)
+- À quelle distance elle est (closest_food_dist)
+
+ETAPE 5 : Calculer la DIRECTION vers cette food
+
+    direction_to_food_x = float(closest_food_x - pac_pos_x)
+    direction_to_food_y = float(closest_food_y - pac_pos_y)
+
+Ça donne un VECTEUR DIRECTION :
+- Si direction_to_food_x > 0 → la food est à DROITE (East)
+- Si direction_to_food_x < 0 → la food est à GAUCHE (West)
+- Si direction_to_food_y > 0 → la food est en HAUT (North)
+- Si direction_to_food_y < 0 → la food est en BAS (South)
+
+Exemple concret :
+    Pacman est en (2, 3)
+    Food la plus proche est en (5, 1)
+
+    direction_to_food_x = 5 - 2 = 3  (→ aller 3 cases à droite)
+    direction_to_food_y = 1 - 3 = -2 (→ aller 2 cases en bas)
+
+Le réseau va apprendre à utiliser ces directions pour choisir l'action
+qui rapproche Pacman de la nourriture.
+
+
+EXPLICATION DETAILLEE : GEOMETRIE DU LABYRINTHE
+-------------------------------------------------
+Cette partie (lignes 99-153 de data.py) analyse la structure du labyrinthe
+autour de Pacman. C'est important pour éviter les pièges et les culs-de-sac.
+
+OBJECTIF:
+Savoir combien d'espace libre Pacman a dans chaque direction (Nord/Sud/Est/Ouest)
+et détecter s'il est dans un coin dangereux.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FONCTION : dist_until_wall()
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Cette fonction compte combien de cases Pacman peut avancer dans une direction
+avant de rencontrer un mur ou sortir du labyrinthe.
+
+PARAMETRES:
+    start_x, start_y      : Position actuelle de Pacman
+    direction_x, direction_y : Direction à explorer
+                               (0,1)=Nord, (0,-1)=Sud, (1,0)=Est, (-1,0)=Ouest
+
+ALGORITHME:
+
+    distance = 0
+    current_x, current_y = start_x, start_y
+
+    while True:
+        # Avancer d'une case dans la direction
+        current_x += direction_x
+        current_y += direction_y
+
+        # Vérifier si on sort du labyrinthe
+        if not (0 <= current_x < W and 0 <= current_y < H):
+            break
+
+        # Vérifier si on a touché un mur
+        if walls[current_x][current_y]:
+            break
+
+        # Sinon, on a trouvé une case libre
+        distance += 1
+
+    return float(distance)
+
+EXEMPLE VISUEL:
+
+    Pacman est ici: P
+    Murs: #
+    Espace libre: .
+
+    # # # # # # #
+    # . . . . . #
+    # # P . . . #  ← Pacman en (2,2)
+    # # # . . . #
+    # # # # # # #
+
+dist_until_wall(2, 2, 1, 0) = ?  (direction Est = droite)
+    - (3,2) libre → distance = 1
+    - (4,2) libre → distance = 2
+    - (5,2) libre → distance = 3
+    - (6,2) mur → STOP
+    → Retourne 3
+
+dist_until_wall(2, 2, -1, 0) = ?  (direction Ouest = gauche)
+    - (1,2) mur → STOP immédiatement
+    → Retourne 0 (coincé contre un mur!)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CALCUL DES DISTANCES DANS LES 4 DIRECTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    dist_north = dist_until_wall(pac_pos_x, pac_pos_y, 0, 1)   # Haut
+    dist_south = dist_until_wall(pac_pos_x, pac_pos_y, 0, -1)  # Bas
+    dist_east = dist_until_wall(pac_pos_x, pac_pos_y, 1, 0)    # Droite
+    dist_west = dist_until_wall(pac_pos_x, pac_pos_y, -1, 0)   # Gauche
+
+Ces 4 features disent au réseau:
+"Dans quelle direction ai-je le plus d'espace pour manoeuvrer?"
+
+Si dist_north = 0 et dist_east = 8:
+→ Mur au nord, long couloir à l'est → privilégier l'est!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DETECTION DE COIN (CORNER)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Un coin = position dangereuse avec peu d'issues de secours.
+
+ALGORITHME:
+
+    free_directions = 0
+    for direction_x, direction_y in [(1,0), (-1,0), (0,1), (0,-1)]:
+        neighbor_x = pac_pos_x + direction_x
+        neighbor_y = pac_pos_y + direction_y
+
+        # Vérifier si la case voisine est valide et pas un mur
+        if (0 <= neighbor_x < W and
+            0 <= neighbor_y < H and
+            not walls[neighbor_x][neighbor_y]):
+            free_directions += 1
+
+    # Définition de "coin": 2 directions libres ou moins
+    is_corner = 1.0 if free_directions <= 2 else 0.0
+
+EXEMPLES:
+
+1. Coin classique (2 directions libres):
+    # # #
+    # P .
+    # . .
+
+    → Nord: mur
+    → Sud: libre ✓
+    → Est: libre ✓
+    → Ouest: mur
+    → free_directions = 2 → is_corner = 1 (DANGER!)
+
+2. Couloir (2 directions libres):
+    # # #
+    . P .
+    # # #
+
+    → Nord: mur
+    → Sud: mur
+    → Est: libre ✓
+    → Ouest: libre ✓
+    → free_directions = 2 → is_corner = 1 (piégé dans couloir!)
+
+3. Intersection (4 directions libres):
+    # . #
+    . P .
+    # . #
+
+    → Toutes directions libres
+    → free_directions = 4 → is_corner = 0 (beaucoup de liberté!)
+
+POURQUOI C'EST IMPORTANT:
+Les coins sont dangereux car si un ghost arrive, Pacman a peu d'options
+pour s'échapper. Le réseau apprend à éviter ces situations.
+
+NORMALISATION FINALE:
+    dist_north / 10.0  → distances normalisées (~0-1)
+    is_corner          → déjà 0 ou 1 (pas besoin de normaliser)
+
+
 ================================================================================
 PARTIE 3 : ARCHITECTURE DU RESEAU (architecture.py)
 ================================================================================
 
-CHOIX DE L'ARCHITECTURE:
-------------------------
-On utilise un MLP (Multi-Layer Perceptron) car:
-- Notre input est un vecteur 1D (24 features)
-- Pas besoin de CNN (pas de structure 2D/spatiale)
-- Simple et efficace pour cette tâche
+POURQUOI UN MLP ET PAS UN CNN ?
+-------------------------------
+- CNN = fait pour les images 2D (exploite les pixels voisins)
+- Notre input = vecteur 1D de 24 features déjà calculées
+- Ces features n'ont pas de relation spatiale entre elles
+- Donc un MLP (Multi-Layer Perceptron) est le bon choix
 
 STRUCTURE:
 ----------
-Input (24) → Linear(128) → BatchNorm → ReLU → Dropout(0.1)
-          → Linear(128) → BatchNorm → ReLU → Dropout(0.1)
-          → Linear(64)  → BatchNorm → ReLU → Dropout(0.1)
-          → Linear(5)   → Output (logits)
+Pour chaque couche cachée : Linear → BatchNorm → ReLU
 
-JUSTIFICATION DES CHOIX:
+24 → 128 → 128 → 64 → 5
 
-1. Taille des couches (128 → 128 → 64):
-   - Assez de capacité pour apprendre les patterns complexes
-   - Réduction progressive pour compresser l'information
-   - Testé empiriquement
+EXPLICATION DES COMPOSANTS:
+---------------------------
+1. Linear : transforme les données (multiplication matricielle + biais)
+2. BatchNorm : normalise les valeurs entre les couches (stabilise l'entraînement)
+3. ReLU : ajoute de la non-linéarité (sans ça, tout serait linéaire)
+4. Pas d'activation finale : CrossEntropyLoss veut des logits bruts
 
-2. BatchNorm après chaque couche linéaire:
-   - Stabilise l'entraînement (évite les gradients explosifs)
-   - Accélère la convergence
-   - Permet d'utiliser des learning rates plus élevés
-
-3. ReLU comme activation:
-   - Simple et efficace
-   - Pas de problème de vanishing gradient
-   - Standard dans les MLP modernes
-
-4. Dropout 0.1 (faible):
-   - Régularisation légère pour éviter l'overfitting
-   - 0.1 au lieu de 0.2 car on veut garder l'information
-   - BatchNorm fait déjà de la régularisation
-
-5. Pas d'activation finale:
-   - CrossEntropyLoss attend des logits bruts
-   - Elle applique LogSoftmax en interne
+POURQUOI BATCHNORM ?
+--------------------
+Sans BatchNorm, l'entraînement était instable et Pacman perdait.
+BatchNorm normalise les valeurs pour que chaque couche reçoive
+des données dans une bonne plage, ce qui stabilise les gradients.
 
 
 ================================================================================
@@ -169,7 +389,6 @@ HYPERPARAMETRES:
 - batch_size = 128      → Bon équilibre vitesse/stabilité
 - epochs = 50           → Assez pour converger
 - lr = 1e-3             → Learning rate standard pour Adam
-- weight_decay = 1e-4   → Régularisation L2 légère
 - val_ratio = 0.2       → 20% pour validation
 
 LOSS FUNCTION: CrossEntropyLoss
@@ -181,13 +400,7 @@ OPTIMIZER: Adam
 ---------------
 Adam est le choix par défaut pour le deep learning:
 - Adapte le learning rate par paramètre
-- Gère bien les gradients bruités
 - Converge rapidement
-
-LEARNING RATE SCHEDULER: ReduceLROnPlateau
-------------------------------------------
-Réduit le lr de 50% si la val_loss ne s'améliore pas pendant 5 epochs.
-Permet un apprentissage plus fin vers la fin de l'entraînement.
 
 CHECKPOINTING:
 --------------
@@ -199,21 +412,66 @@ Cela évite de garder un modèle overfit.
 PARTIE 5 : AGENT (pacmanagent.py)
 ================================================================================
 
-FONCTIONNEMENT:
----------------
-L'agent est très simple (comme requis par le projet):
-
+FONCTIONNEMENT GLOBAL:
+----------------------
 1. Recevoir un GameState
 2. Convertir en tenseur avec state_to_tensor()
-3. Passer le tenseur dans le modèle
+3. Passer le tenseur dans le modèle (FORWARD PASS)
 4. Obtenir les probabilités avec softmax
 5. Retourner la meilleure action LEGALE
 
+EXPLICATION DETAILLEE DU FORWARD PASS:
+---------------------------------------
+C'est la partie où le modèle fait sa prédiction. Voici le code :
+
+    x = state_to_tensor(state).unsqueeze(0)  # (24,) -> (1, 24)
+    with torch.no_grad():
+        logits = self.model(x)[0]
+        probs = torch.softmax(logits, dim=0)
+        sorted_indices = torch.argsort(probs, descending=True).tolist()
+
+Ligne par ligne :
+
+0. x.unsqueeze(0)
+   → PROBLEME : state_to_tensor() retourne shape (24,) = juste 24 nombres
+   → Le réseau attend shape (batch_size, 24) car il a été entraîné avec des batches
+   → SOLUTION : unsqueeze(0) ajoute une dimension "batch" artificielle
+   → (24,) devient (1, 24) = "un batch de 1 exemple"
+   → Sans ça, le réseau crash !
+
+   Pourquoi "0" ? Car on ajoute la dimension à la position 0 (au début).
+   unsqueeze(1) donnerait (24, 1) ce qui est faux.
+
+1. torch.no_grad()
+   → Dit à PyTorch : "on ne va pas entraîner, juste prédire"
+   → Plus rapide car pas besoin de calculer les gradients
+   → OBLIGATOIRE en inférence (quand on joue)
+
+2. logits = self.model(x)[0]
+   → self.model(x) : passe le tenseur (1, 24) dans le réseau
+   → Le réseau sort (1, 5) : 1 batch, 5 actions
+   → [0] enlève la dimension batch → devient shape (5)
+   → logits = 5 nombres bruts (ex: [2.3, -0.5, 1.2, 0.8, -1.0])
+
+3. probs = torch.softmax(logits, dim=0)
+   → Convertit les logits en probabilités qui somment à 1
+   → Exemple : [2.3, -0.5, 1.2, 0.8, -1.0]
+             → [0.68, 0.04, 0.22, 0.15, 0.02]
+   → Maintenant chaque nombre = probabilité que cette action soit la bonne
+
+4. sorted_indices = torch.argsort(probs, descending=True).tolist()
+   → Trie les actions par probabilité décroissante
+   → Exemple : si probs = [0.68, 0.04, 0.22, 0.15, 0.02]
+             → sorted_indices = [0, 2, 3, 1, 4]
+   → Ça veut dire : action 0 la plus probable, puis 2, puis 3, etc.
+
+5. On retourne la première action LEGALE dans cet ordre
+
 POURQUOI VERIFIER LES ACTIONS LEGALES:
 --------------------------------------
-Le modèle pourrait prédire une action illégale (ex: aller au Nord
-quand il y a un mur). On trie les actions par probabilité et on
-prend la première qui est légale.
+Le modèle pourrait prédire action 0 (NORTH) avec 68% de probabilité,
+mais s'il y a un mur au Nord, cette action est ILLEGALE.
+On parcourt donc la liste triée et on prend la première qui est légale.
 
 PAS DE HEURISTIQUES:
 --------------------
@@ -222,32 +480,9 @@ Toute la logique vient du réseau de neurones. C'est le principe de
 l'imitation learning: apprendre à imiter, pas coder des règles.
 
 
-================================================================================
-PARTIE 6 : RESULTATS
-================================================================================
-
-AVANT LES AMELIORATIONS:
-------------------------
-- val_accuracy: ~85%
-- Score en jeu: -488 (Pacman meurt)
-- Problème: boucles infinies, ne comprend pas le danger
-
-APRES LES AMELIORATIONS:
-------------------------
-- val_accuracy: 87.45%
-- Score en jeu: +528 (Pacman GAGNE!)
-- Temps de calcul: ~0.2 secondes
-
-CE QUI A FAIT LA DIFFERENCE:
-----------------------------
-1. Normalisation des features → convergence plus rapide
-2. BatchNorm → entraînement stable
-3. Features de danger → le modèle comprend QUAND c'est dangereux
-4. Learning rate scheduler → meilleure convergence finale
-
 
 ================================================================================
-PARTIE 7 : COMMANDES UTILES
+PARTIE 6 : COMMANDES UTILES
 ================================================================================
 
 # Entraîner le modèle
@@ -261,20 +496,25 @@ python write_submission.py
 
 
 ================================================================================
-PARTIE 8 : QUESTIONS POSSIBLES A L'ORAL
+PARTIE 7 : QUESTIONS POSSIBLES A L'ORAL
 ================================================================================
 
 Q: Pourquoi un MLP et pas un CNN?
-R: Notre input est un vecteur 1D de features, pas une image 2D.
-   Les convolutions n'ont pas de sens sur un vecteur 1D.
+R: Les CNN sont faits pour les images 2D où les pixels voisins sont liés.
+   Notre input est un vecteur 1D de 24 features sans relation spatiale.
+   Un MLP simple (Linear + ReLU) est donc le bon choix.
 
 Q: Pourquoi normaliser les features?
 R: Les NN convergent mieux quand les inputs sont dans la même échelle.
    Sans normalisation, certaines features domineraient les autres.
 
+Q: Pourquoi ReLU?
+R: C'est l'activation la plus simple et efficace. Elle rend le réseau
+   non-linéaire (sinon tout serait une simple multiplication matricielle).
+
 Q: Pourquoi BatchNorm?
-R: Stabilise l'entraînement, accélère la convergence, et fait de la
-   régularisation. C'est devenu standard dans les architectures modernes.
+R: Sans BatchNorm, l'entraînement était instable. BatchNorm normalise
+   les valeurs entre les couches pour stabiliser les gradients.
 
 Q: Pourquoi CrossEntropyLoss?
 R: C'est la loss standard pour la classification multi-classe.
@@ -300,7 +540,7 @@ R: Testé empiriquement. Moins = underfitting, plus = overfitting.
 
 
 ================================================================================
-PARTIE 9 : COMPARAISON ORIGINAL vs NOTRE IMPLEMENTATION
+PARTIE 8 : COMPARAISON ORIGINAL vs NOTRE IMPLEMENTATION
 ================================================================================
 
 Les fichiers du GitHub sont des TEMPLATES VIDES avec "# Your code here".
@@ -326,9 +566,8 @@ NOTRE IMPLEMENTATION:
 - input_dim = 24 (nos features)
 - output_dim = 5 (les 5 actions)
 - 3 couches cachées: 128 → 128 → 64
-- BatchNorm1d après chaque Linear (stabilité)
+- BatchNorm après chaque Linear (stabilité)
 - ReLU comme activation
-- Dropout(0.1) pour régularisation
 - Pas d'activation finale (CrossEntropyLoss veut des logits)
 
 
@@ -390,8 +629,7 @@ NOTRE IMPLEMENTATION:
 __init__:
   - device = cuda ou cpu
   - criterion = CrossEntropyLoss()
-  - optimizer = Adam(lr=1e-3, weight_decay=1e-4)
-  - scheduler = ReduceLROnPlateau (réduit lr si val_loss stagne)
+  - optimizer = Adam(lr=1e-3)
 
 train():
   - Split 80/20 train/validation
@@ -399,7 +637,7 @@ train():
   - 50 epochs avec:
     * Phase training (model.train())
     * Phase validation (model.eval(), torch.no_grad())
-    * Affichage loss et accuracy
+    * Affichage accuracy
     * Sauvegarde du meilleur modèle (best val_acc)
 
 

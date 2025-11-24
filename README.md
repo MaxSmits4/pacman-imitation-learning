@@ -1,10 +1,10 @@
 # Pacman - Imitation Learning
 
-Projet réalisé dans le cadre du cours **INFO8006 - Introduction to Artificial Intelligence** (ULiège).
+Project for **INFO8006 - Introduction to Artificial Intelligence** (ULiège).
 
 ## Description
 
-L'objectif est d'entraîner un réseau de neurones à imiter un joueur expert de Pacman. Le modèle apprend à partir de paires (état du jeu, action de l'expert) et prédit quelle action prendre dans chaque situation.
+Train a neural network to imitate an expert Pacman player. The model learns from (game state, expert action) pairs and predicts which action to take in each situation.
 
 ## Installation
 
@@ -12,23 +12,23 @@ L'objectif est d'entraîner un réseau de neurones à imiter un joueur expert de
 pip install torch pandas
 ```
 
-## Utilisation
+## Usage
 
-**1. Entraîner le modèle :**
+**1. Train the model:**
 ```bash
 python train.py
 ```
-Cela génère `pacman_model.pth`.
+This generates `pacman_model.pth`.
 
-**2. Lancer le jeu :**
+**2. Run the game:**
 ```bash
 python run.py
 ```
 
 ## Structure
 
-- `architecture.py` - Réseau de neurones (MLP)
-- `data.py` - Extraction des features et dataset
-- `train.py` - Pipeline d'entraînement
-- `pacmanagent.py` - Agent qui utilise le modèle
-- `run.py` - Lance une partie avec l'agent entraîné
+- `architecture.py` - Neural network (MLP)
+- `data.py` - Feature extraction and dataset
+- `train.py` - Training pipeline
+- `pacmanagent.py` - Agent using the trained model
+- `run.py` - Run a game with the trained agent
